@@ -26,6 +26,8 @@
 #include "esp_spiffs.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
+#include "driver/rmt_tx.h"
+#include "driver/rmt_encoder.h"
 #include "esp_lcd_panel_io.h"
 
 #include "doomgeneric.h"
@@ -64,6 +66,11 @@ static const char *TAG = "doom";
 #define BTN_Y     0x20
 #define BTN_A     0x40
 #define BTN_B     0x80
+
+/* ---- WS2812 LEDs (gameplay feedback: red on damage, gold on pickup) ---- */
+#define PIN_LED_DATA 48
+#define PIN_LED_EN   47
+#define NUM_LEDS     6
 
 /* ---- ST7735 ---- */
 static esp_lcd_panel_io_handle_t s_io;
@@ -202,6 +209,68 @@ static uint8_t sr_read(void)
     return v;
 }
 
+/* ---- LEDs ---- */
+static rmt_channel_handle_t s_rmt;
+static rmt_encoder_handle_t s_rmt_enc;
+
+static void leds_init(void)
+{
+    gpio_config_t en = { .pin_bit_mask = 1ULL << PIN_LED_EN, .mode = GPIO_MODE_OUTPUT };
+    gpio_config(&en);
+    gpio_set_level(PIN_LED_EN, 1);          /* power the WS2812 rail */
+
+    rmt_tx_channel_config_t tx = {
+        .gpio_num = PIN_LED_DATA,
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz = 10 * 1000 * 1000,
+        .mem_block_symbols = 64,
+        .trans_queue_depth = 4,
+    };
+    if (rmt_new_tx_channel(&tx, &s_rmt) != ESP_OK) return;
+
+    rmt_bytes_encoder_config_t enc = {
+        .bit0 = { .level0 = 1, .duration0 = 3, .level1 = 0, .duration1 = 9 },
+        .bit1 = { .level0 = 1, .duration0 = 6, .level1 = 0, .duration1 = 6 },
+        .flags.msb_first = 1,
+    };
+    rmt_new_bytes_encoder(&enc, &s_rmt_enc);
+    rmt_enable(s_rmt);
+}
+
+static void leds_all(uint8_t r, uint8_t g, uint8_t b)
+{
+    if (!s_rmt) return;
+    uint8_t grb[NUM_LEDS * 3];
+    for (int i = 0; i < NUM_LEDS; i++) {
+        grb[i * 3 + 0] = g;
+        grb[i * 3 + 1] = r;
+        grb[i * 3 + 2] = b;
+    }
+    rmt_transmit_config_t tc = { .loop_count = 0 };
+    rmt_transmit(s_rmt, s_rmt_enc, grb, sizeof(grb), &tc);
+    rmt_tx_wait_all_done(s_rmt, portMAX_DELAY);
+}
+
+/* Drive the LEDs from the finished frame's overall colour cast:
+ * DOOM tints the whole screen red when you're hit and gold on a pickup. */
+static void leds_from_frame(uint32_t sr, uint32_t sg, uint32_t sb, uint32_t n)
+{
+    if (!n) return;
+    int r = sr / n, g = sg / n, b = sb / n;
+    int redness = r - (g + b) / 2;          /* damage flash */
+    int goldness = (r + g) / 2 - b;         /* pickup / bonus flash */
+
+    if (redness > 12) {
+        int v = redness * 2; if (v > 60) v = 60;
+        leds_all(v, 0, 0);
+    } else if (goldness > 18 && r > 40 && g > 30) {
+        int v = goldness; if (v > 32) v = 32;
+        leds_all(v, (v * 3) / 4, 0);
+    } else {
+        leds_all(0, 0, 0);                  /* idle: dark */
+    }
+}
+
 static void poll_input(void)
 {
     uint8_t now = sr_read();
@@ -227,10 +296,12 @@ void DG_Init(void)
 
     display_init();
     input_init();
+    leds_init();
+    leds_all(0, 0, 0);                 /* clear whatever the last firmware left */
     s_btn_prev = sr_read();
 
     gpio_set_level(PIN_BL, 1);
-    ESP_LOGI(TAG, "display + input up");
+    ESP_LOGI(TAG, "display + input + leds up");
 }
 
 void DG_DrawFrame(void)
@@ -239,6 +310,7 @@ void DG_DrawFrame(void)
 
     xSemaphoreTake(s_flush_done, portMAX_DELAY);   /* wait for previous flush */
 
+    uint32_t sumR = 0, sumG = 0, sumB = 0;
     for (int y = 0; y < VIEW_H; y++) {
         const uint32_t *r0 = src + (size_t)(y * 2) * DOOMGENERIC_RESX;
         const uint32_t *r1 = r0 + DOOMGENERIC_RESX;
@@ -252,6 +324,7 @@ void DG_DrawFrame(void)
                     + (int)((c >> 8) & 0xff) + (int)((e >> 8) & 0xff)) >> 2;
             int bb = ((int)(a & 0xff) + (int)(b & 0xff)
                     + (int)(c & 0xff) + (int)(e & 0xff)) >> 2;
+            sumR += rr; sumG += gg; sumB += bb;
             uint16_t v = (uint16_t)(((rr & 0xf8) << 8) | ((gg & 0xfc) << 3) | (bb >> 3));
             d[x] = (uint16_t)((v >> 8) | (v << 8));
         }
@@ -263,6 +336,7 @@ void DG_DrawFrame(void)
     st_cmd_d(0x2B, (uint8_t[]){y0 >> 8, y0 & 0xFF, y1 >> 8, y1 & 0xFF}, 4);
     esp_lcd_panel_io_tx_color(s_io, 0x2C, s_fb, LCD_W * LCD_H * 2);
 
+    leds_from_frame(sumR, sumG, sumB, (uint32_t)VIEW_W * VIEW_H);
     poll_input();
 
     static uint32_t frames;

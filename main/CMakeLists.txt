@@ -4,6 +4,7 @@ idf_component_register(SRCS "doomgeneric_bcd.c"
                                 esp_lcd
                                 esp_driver_spi
                                 esp_driver_gpio
+                                esp_driver_rmt
                                 esp_timer
                                 esp_psram
                                 spiffs)
