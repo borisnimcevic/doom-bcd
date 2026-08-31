@@ -260,11 +260,12 @@ static void leds_from_frame(uint32_t sr, uint32_t sg, uint32_t sb, uint32_t n)
     int redness = r - (g + b) / 2;          /* damage flash */
     int goldness = (r + g) / 2 - b;         /* pickup / bonus flash */
 
+    /* keep these tiny — the LEDs are right under your eyes */
     if (redness > 12) {
-        int v = redness * 2; if (v > 60) v = 60;
+        int v = redness / 2; if (v > 20) v = 20;
         leds_all(v, 0, 0);
     } else if (goldness > 18 && r > 40 && g > 30) {
-        int v = goldness; if (v > 32) v = 32;
+        int v = goldness / 3; if (v > 12) v = 12;
         leds_all(v, (v * 3) / 4, 0);
     } else {
         leds_all(0, 0, 0);                  /* idle: dark */
