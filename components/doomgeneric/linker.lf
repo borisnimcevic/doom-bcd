@@ -1,0 +1,6 @@
+# DOOM's large static arrays don't need fast internal RAM — park the whole
+# component's .bss / COMMON in external PSRAM.
+[mapping:doomgeneric]
+archive: libdoomgeneric.a
+entries:
+    * (extram_bss)
